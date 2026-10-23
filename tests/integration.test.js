@@ -186,3 +186,65 @@ test('fresheye-ctl.js and statusline.js end-to-end session pairing, switching, a
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('hook.js does not hijack pendingOpen for an existing multi-turn conversation in another terminal', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fresheye-concurrent-test-'));
+  const storePath = path.join(tmpDir, 'store.json');
+  const env = { ...process.env, CYCLOPS_FRESHEYE_STORE: storePath };
+
+  try {
+    // 1. User runs prepare-open in /workspace/draw from origin-draw-1111
+    execFileSync(
+      'node',
+      [
+        CTL_PATH,
+        'prepare-open',
+        '--origin',
+        'origin-draw-1111',
+        '--workspace',
+        '/workspace/draw',
+        '--interactive',
+        '--mode',
+        'session',
+      ],
+      { env, encoding: 'utf8' },
+    );
+
+    // 2. Meanwhile, an existing long-running conversation in another terminal fires PreInvocation
+    handleHookPayload(
+      {
+        conversationId: 'existing-other-chat-9999',
+        modelName: 'Gemini 4 Argon (High)',
+        workspacePaths: ['/workspace/other'],
+        invocationNum: 4,
+        initialNumSteps: 120,
+      },
+      'PreInvocation',
+      env,
+    );
+
+    // Verify existing-other-chat-9999 did NOT consume pendingOpen
+    let store = loadStore(storePath);
+    assert.equal(Boolean(store.pairs['existing-other-chat-9999']), false);
+    assert.equal(store.pendingOpen?.originId, 'origin-draw-1111');
+
+    // 3. Now the actual new FreshEye session in /workspace/draw fires its first PreInvocation (invocationNum: 1)
+    handleHookPayload(
+      {
+        conversationId: 'fresh-draw-2222',
+        modelName: 'Gemini 4 Argon (High)',
+        workspacePaths: ['/workspace/draw'],
+        invocationNum: 1,
+        initialNumSteps: 1,
+      },
+      'PreInvocation',
+      env,
+    );
+
+    store = loadStore(storePath);
+    assert.equal(store.pairs['fresh-draw-2222']?.originId, 'origin-draw-1111');
+    assert.equal(store.pendingOpen, null);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

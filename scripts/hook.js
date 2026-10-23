@@ -149,11 +149,19 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
 
   // 2. SessionStart / PreInvocation / Stop with a conversationId
   if (convId) {
+    const isBrandNewTurn =
+      event === 'SessionStart' ||
+      (event === 'PreInvocation' &&
+        (payload?.invocationNum === undefined || Number(payload.invocationNum) <= 1) &&
+        (payload?.initialNumSteps === undefined || Number(payload.initialNumSteps) <= 3));
+
     // Check if there is a pendingOpen waiting for the new FreshEye conversationId
     if (
       store.pendingOpen &&
+      isBrandNewTurn &&
       convId !== store.pendingOpen.originId &&
-      convId !== store.pendingOpen.fromId
+      convId !== store.pendingOpen.fromId &&
+      !store.pairs[convId]
     ) {
       const pending = store.pendingOpen;
       recordOpenPair(store, {
@@ -171,8 +179,8 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
     const prevId = String(store.activeSession?.id || '').trim();
     const isFresh = Boolean(store.pairs[convId]);
 
-    // Detect return/enter transitions between paired sessions when switching via /resume or CLI
-    if (prevId && prevId !== convId && (event === 'SessionStart' || event === 'PreInvocation')) {
+    // Detect return/enter transitions only on SessionStart (not on every PreInvocation across concurrent terminals)
+    if (prevId && prevId !== convId && event === 'SessionStart') {
       const prevPair = store.pairs[prevId];
       const currPair = store.pairs[convId];
 
