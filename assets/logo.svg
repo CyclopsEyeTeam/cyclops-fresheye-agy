@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <!-- 10% safe margin baked in (content within 28..228) -->
+  <defs>
+    <radialGradient id="feGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.35"/>
+      <stop offset="65%" stop-color="#0284C7" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#0284C7" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="feRing" x1="28" y1="28" x2="228" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7DD3FC"/>
+      <stop offset="50%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Subtle ambient halo -->
+  <circle cx="128" cy="128" r="98" fill="url(#feGlow)"/>
+
+  <!-- Outer FreshEye ring (◎) -->
+  <circle cx="128" cy="128" r="84" stroke="url(#feRing)" stroke-width="12"/>
+
+  <!-- Precision cardinal ticks -->
+  <line x1="128" y1="28" x2="128" y2="44" stroke="#E0F2FE" stroke-width="6" stroke-linecap="round"/>
+  <line x1="128" y1="212" x2="128" y2="228" stroke="#E0F2FE" stroke-width="6" stroke-linecap="round"/>
+  <line x1="28" y1="128" x2="44" y2="128" stroke="#E0F2FE" stroke-width="6" stroke-linecap="round"/>
+  <line x1="212" y1="128" x2="228" y2="128" stroke="#E0F2FE" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Inner iris ring -->
+  <circle cx="128" cy="128" r="46" stroke="#E0F2FE" stroke-width="8" stroke-dasharray="180 28" stroke-linecap="round"/>
+
+  <!-- Core pupil -->
+  <circle cx="128" cy="128" r="20" fill="#38BDF8"/>
+  <circle cx="120" cy="120" r="6" fill="#FFFFFF"/>
+</svg>

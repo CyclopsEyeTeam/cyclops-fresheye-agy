@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# agy-fresheye - Interactive Cyclops FreshEye launcher & session switcher for Antigravity (agy)
+#
+# Usage:
+#   agy-fresheye "Review src/parser.ts..."   # Open a clean-context FreshEye session on the same model
+#   agy-fresheye                             # Switch between original and paired FreshEye session (ask/toggle/off)
+#   agy-fresheye --log [count]               # Show the FreshEye session & switch history ledger
+#   agy-fresheye --status                    # Show current pairing status
+#   agy-fresheye --mode <ask|toggle|off>     # Set bare switch behavior
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PLUGIN_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
+CTL_JS="$PLUGIN_ROOT/scripts/fresheye-ctl.js"
+AGY_BIN="${AGY_BIN:-$(command -v agy || echo "${HOME:-}/.local/bin/agy")}"
+
+PASSTHROUGH_ARGS=()
+PROMPT_TEXT=""
+ACTION="auto"
+FORCE_NEW=0
+LOG_COUNT="20"
+MODE_VAL=""
+SESSION_ID=""
+
+while [ $# -gt 0 ]; do
+  arg="$1"
+  case "$arg" in
+    --fresheye|--cyclops-fresheye)
+      shift
+      ;;
+    --new|--open)
+      FORCE_NEW=1
+      shift
+      ;;
+    --switch)
+      ACTION="switch"
+      shift
+      ;;
+    --fresheye-log|--log)
+      ACTION="log"
+      shift
+      if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        LOG_COUNT="$1"
+        shift
+      fi
+      ;;
+    --status)
+      ACTION="status"
+      shift
+      ;;
+    --switch-mode|--fresheye-mode)
+      ACTION="mode"
+      shift
+      if [ $# -gt 0 ]; then
+        MODE_VAL="$1"
+        shift
+      fi
+      ;;
+    --session)
+      shift
+      if [ $# -gt 0 ]; then
+        SESSION_ID="$1"
+        shift
+      fi
+      ;;
+    -h|--help)
+      cat << 'EOF'
+Cyclops FreshEye for Antigravity (agy) — Same AI, fresh perspective.
+
+Usage:
+  agy --fresheye "prompt"        Open a fresh-context FreshEye session on the same model
+  agy --fresheye                 Switch between original and paired FreshEye session
+  agy --fresheye-log [count]     Display the FreshEye session & switch ledger
+  agy-fresheye --status          Show current session pairing status
+  agy-fresheye --switch-mode <m> Configure bare switch mode (ask | toggle | off)
+EOF
+      exit 0
+      ;;
+    -i|--prompt-interactive|-p|--print|--prompt)
+      shift
+      if [ $# -gt 0 ]; then
+        PROMPT_TEXT="$1"
+        shift
+      fi
+      ;;
+    --model|--effort|--mode|--project|--add-dir|--log-file|--json-schema|--output-format|--input-format|--print-timeout)
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      if [ $# -gt 0 ]; then
+        PASSTHROUGH_ARGS+=("$1")
+        shift
+      fi
+      ;;
+    --)
+      shift
+      if [ -z "$PROMPT_TEXT" ] && [ $# -gt 0 ]; then
+        PROMPT_TEXT="$*"
+      fi
+      break
+      ;;
+    -*)
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      ;;
+    *)
+      if [ -z "$PROMPT_TEXT" ]; then
+        PROMPT_TEXT="$1"
+      else
+        PROMPT_TEXT="$PROMPT_TEXT $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [ "$ACTION" = "log" ]; then
+  exec node "$CTL_JS" log "$LOG_COUNT"
+fi
+
+if [ "$ACTION" = "status" ]; then
+  if [ -n "$SESSION_ID" ]; then
+    exec node "$CTL_JS" status --session "$SESSION_ID"
+  else
+    exec node "$CTL_JS" status
+  fi
+fi
+
+if [ "$ACTION" = "mode" ]; then
+  if [ -n "$MODE_VAL" ]; then
+    exec node "$CTL_JS" mode "$MODE_VAL"
+  else
+    exec node "$CTL_JS" mode
+  fi
+fi
+
+# Case 1: Prompt provided -> Open a new clean-context FreshEye session (`--agent fresheye -i "<prompt>"`)
+if [ -n "${PROMPT_TEXT// /}" ]; then
+  PREPARE_ARGS=(prepare-open --prompt "$PROMPT_TEXT" --mode session --workspace "$(pwd -P)")
+  if [ -n "$SESSION_ID" ]; then
+    PREPARE_ARGS+=(--origin "$SESSION_ID")
+  fi
+  ORIGIN_ID="$(node "$CTL_JS" "${PREPARE_ARGS[@]}")"
+  echo "◎ Opening FreshEye · Fresh Context (original ${ORIGIN_ID:0:8} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
+  if ! "$AGY_BIN" --agent fresheye "${PASSTHROUGH_ARGS[@]}" -i "$PROMPT_TEXT"; then
+    node "$CTL_JS" open-failed --origin "$ORIGIN_ID" --prompt "$PROMPT_TEXT" --note "agy --agent fresheye exited non-zero" || true
+    exit 1
+  fi
+  exit 0
+fi
+
+# Case 2: Bare `agy --fresheye` (no prompt on CLI)
+# Check if an existing pair exists for this conversation. If not (or if --new was passed),
+# launch an interactive `agy --agent fresheye` session so the user can type their prompt inside the TUI!
+HAS_PAIR="false"
+if [ "$FORCE_NEW" -eq 0 ] && [ "$ACTION" != "switch" ]; then
+  STATUS_ARGS=(status --json)
+  if [ -n "$SESSION_ID" ]; then
+    STATUS_ARGS+=(--session "$SESSION_ID")
+  fi
+  STATUS_JSON="$(node "$CTL_JS" "${STATUS_ARGS[@]}" 2>/dev/null || echo "{}")"
+  HAS_PAIR="$(node -e 'try { const d = JSON.parse(process.argv[1]); process.stdout.write(d.target ? "true" : "false"); } catch { process.stdout.write("false"); }' "$STATUS_JSON")"
+fi
+
+if [ "$FORCE_NEW" -eq 1 ] || { [ "$ACTION" != "switch" ] && [ "$HAS_PAIR" = "false" ]; }; then
+  PREPARE_ARGS=(prepare-open --interactive --mode session --workspace "$(pwd -P)")
+  if [ -n "$SESSION_ID" ]; then
+    PREPARE_ARGS+=(--origin "$SESSION_ID")
+  fi
+  ORIGIN_ID="$(node "$CTL_JS" "${PREPARE_ARGS[@]}")"
+  echo "◎ Opening interactive FreshEye · Fresh Context (original ${ORIGIN_ID:0:8} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
+  if ! "$AGY_BIN" --agent fresheye "${PASSTHROUGH_ARGS[@]}"; then
+    node "$CTL_JS" open-failed --origin "$ORIGIN_ID" --prompt "(interactive session)" --note "agy --agent fresheye exited non-zero" || true
+    exit 1
+  fi
+  exit 0
+fi
+
+# Case 3: Pair exists -> Switch between paired original and FreshEye conversation
+SWITCH_ARGS=(switch --check-disk)
+if [ -n "$SESSION_ID" ]; then
+  SWITCH_ARGS+=(--session "$SESSION_ID")
+fi
+
+TARGET_JSON=""
+if TARGET_JSON="$(node "$CTL_JS" "${SWITCH_ARGS[@]}" --json)"; then
+  TARGET_ID="$(node -e 'const d = JSON.parse(process.argv[1]); process.stdout.write(d.targetId || "");' "$TARGET_JSON")"
+  DIRECTION="$(node -e 'const d = JSON.parse(process.argv[1]); process.stdout.write(d.direction || "");' "$TARGET_JSON")"
+  if [ -n "$TARGET_ID" ]; then
+    if [ "$DIRECTION" = "enter" ]; then
+      echo "◎ Entering paired FreshEye conversation (${TARGET_ID:0:8})..." >&2
+      exec "$AGY_BIN" --agent fresheye --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"
+    else
+      echo "✓ Returning to original conversation (${TARGET_ID:0:8})..." >&2
+      exec "$AGY_BIN" --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"
+    fi
+  fi
+else
+  EXIT_CODE=$?
+  exit "$EXIT_CODE"
+fi

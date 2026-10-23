@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# fresheye-ctl - Wrapper for scripts/fresheye-ctl.js
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PLUGIN_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
+
+exec node "$PLUGIN_ROOT/scripts/fresheye-ctl.js" "$@"

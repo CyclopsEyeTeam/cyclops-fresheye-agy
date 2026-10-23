@@ -1,0 +1,12 @@
+{
+  "name": "cyclops-fresheye",
+  "displayName": "Cyclops FreshEye",
+  "version": "0.2.1",
+  "description": "Same AI, fresh perspective. Open a clean-context FreshEye review or session on the same model with AGENTS.md, GEMINI.md, rules, and ambient customizations withheld, while keeping your original conversation untouched.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "/fresheye Review the recently modified files and list edge cases the tests miss",
+    "/fresheye Audit the authentication flow for security assumptions without relying on prior context",
+    "/fresheye-log 20"
+  ]
+}
