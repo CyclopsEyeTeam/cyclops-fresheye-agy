@@ -22,10 +22,12 @@ AGY_BIN="${AGY_BIN:-$(command -v agy || echo "${HOME:-}/.local/bin/agy")}"
 
 PASSTHROUGH_ARGS=()
 PROMPT_TEXT=""
+PROMPT_FLAG="-i"
 ACTION="auto"
 FORCE_NEW=0
 LOG_COUNT="20"
 MODE_VAL=""
+MODEL_VAL=""
 SESSION_ID=""
 
 while [ $# -gt 0 ]; do
@@ -62,6 +64,23 @@ while [ $# -gt 0 ]; do
         shift
       fi
       ;;
+    --mode)
+      shift
+      if [ $# -gt 0 ]; then
+        case "$1" in
+          ask|toggle|off|ASK|TOGGLE|OFF)
+            ACTION="mode"
+            MODE_VAL="$1"
+            ;;
+          *)
+            PASSTHROUGH_ARGS+=(--mode "$1")
+            ;;
+        esac
+        shift
+      else
+        ACTION="mode"
+      fi
+      ;;
     --session)
       shift
       if [ $# -gt 0 ]; then
@@ -78,18 +97,36 @@ Usage:
   agy --fresheye                 Switch between original and paired FreshEye session
   agy --fresheye-log [count]     Display the FreshEye session & switch ledger
   agy-fresheye --status          Show current session pairing status
-  agy-fresheye --switch-mode <m> Configure bare switch mode (ask | toggle | off)
+  agy-fresheye --mode <m>        Configure bare switch mode (ask | toggle | off)
 EOF
       exit 0
       ;;
-    -i|--prompt-interactive|-p|--print|--prompt)
+    -p|--print)
+      PROMPT_FLAG="-p"
       shift
       if [ $# -gt 0 ]; then
         PROMPT_TEXT="$1"
         shift
       fi
       ;;
-    --model|--effort|--mode|--project|--add-dir|--log-file|--json-schema|--output-format|--input-format|--print-timeout)
+    -i|--prompt-interactive|--prompt)
+      PROMPT_FLAG="-i"
+      shift
+      if [ $# -gt 0 ]; then
+        PROMPT_TEXT="$1"
+        shift
+      fi
+      ;;
+    --model)
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      if [ $# -gt 0 ]; then
+        MODEL_VAL="$1"
+        PASSTHROUGH_ARGS+=("$1")
+        shift
+      fi
+      ;;
+    --effort|--project|--add-dir|--log-file|--json-schema|--output-format|--input-format|--print-timeout|--max-turns)
       PASSTHROUGH_ARGS+=("$1")
       shift
       if [ $# -gt 0 ]; then
@@ -104,7 +141,11 @@ EOF
       fi
       break
       ;;
-    -*)
+    --yolo|--verbose|--debug|--no-color|--worktree|-w|--continue|-c|--resume|-r|--ide|--no-ide)
+      PASSTHROUGH_ARGS+=("$1")
+      shift
+      ;;
+    --*)
       PASSTHROUGH_ARGS+=("$1")
       shift
       ;;
@@ -139,18 +180,24 @@ if [ "$ACTION" = "mode" ]; then
   fi
 fi
 
-# Case 1: Prompt provided -> Open a new clean-context FreshEye session (`--agent fresheye -i "<prompt>"`)
+# Case 1: Prompt provided -> Open a new clean-context FreshEye session (`--agent fresheye -i/-p "<prompt>"`)
 if [ -n "${PROMPT_TEXT// /}" ]; then
   PREPARE_ARGS=(prepare-open --prompt "$PROMPT_TEXT" --mode session --workspace "$(pwd -P)")
   if [ -n "$SESSION_ID" ]; then
     PREPARE_ARGS+=(--origin "$SESSION_ID")
   fi
+  if [ -n "$MODEL_VAL" ]; then
+    PREPARE_ARGS+=(--model "$MODEL_VAL")
+  fi
   ORIGIN_ID="$(node "$CTL_JS" "${PREPARE_ARGS[@]}")"
-  echo "◎ Opening FreshEye · Fresh Context (original ${ORIGIN_ID:0:8} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
-  if ! "$AGY_BIN" --agent fresheye "${PASSTHROUGH_ARGS[@]}" -i "$PROMPT_TEXT"; then
+  ORIGIN_LABEL="${ORIGIN_ID:0:8}"
+  [ -z "$ORIGIN_LABEL" ] && ORIGIN_LABEL="none"
+  echo "◎ Opening FreshEye · Fresh Context (original ${ORIGIN_LABEL} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
+  if ! "$AGY_BIN" --agent fresheye "${PASSTHROUGH_ARGS[@]}" "$PROMPT_FLAG" "$PROMPT_TEXT"; then
     node "$CTL_JS" open-failed --origin "$ORIGIN_ID" --prompt "$PROMPT_TEXT" --note "agy --agent fresheye exited non-zero" || true
     exit 1
   fi
+  node "$CTL_JS" clear-pending >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -172,12 +219,18 @@ if [ "$FORCE_NEW" -eq 1 ] || { [ "$ACTION" != "switch" ] && [ "$HAS_PAIR" = "fal
   if [ -n "$SESSION_ID" ]; then
     PREPARE_ARGS+=(--origin "$SESSION_ID")
   fi
+  if [ -n "$MODEL_VAL" ]; then
+    PREPARE_ARGS+=(--model "$MODEL_VAL")
+  fi
   ORIGIN_ID="$(node "$CTL_JS" "${PREPARE_ARGS[@]}")"
-  echo "◎ Opening interactive FreshEye · Fresh Context (original ${ORIGIN_ID:0:8} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
+  ORIGIN_LABEL="${ORIGIN_ID:0:8}"
+  [ -z "$ORIGIN_LABEL" ] && ORIGIN_LABEL="none"
+  echo "◎ Opening interactive FreshEye · Fresh Context (original ${ORIGIN_LABEL} kept; AGENTS.md, GEMINI.md, rules & skills withheld)..." >&2
   if ! "$AGY_BIN" --agent fresheye "${PASSTHROUGH_ARGS[@]}"; then
     node "$CTL_JS" open-failed --origin "$ORIGIN_ID" --prompt "(interactive session)" --note "agy --agent fresheye exited non-zero" || true
     exit 1
   fi
+  node "$CTL_JS" clear-pending >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -190,14 +243,21 @@ fi
 TARGET_JSON=""
 if TARGET_JSON="$(node "$CTL_JS" "${SWITCH_ARGS[@]}" --json)"; then
   TARGET_ID="$(node -e 'const d = JSON.parse(process.argv[1]); process.stdout.write(d.targetId || "");' "$TARGET_JSON")"
+  FROM_ID="$(node -e 'const d = JSON.parse(process.argv[1]); process.stdout.write(d.fromId || "");' "$TARGET_JSON")"
   DIRECTION="$(node -e 'const d = JSON.parse(process.argv[1]); process.stdout.write(d.direction || "");' "$TARGET_JSON")"
   if [ -n "$TARGET_ID" ]; then
     if [ "$DIRECTION" = "enter" ]; then
       echo "◎ Entering paired FreshEye conversation (${TARGET_ID:0:8})..." >&2
-      exec "$AGY_BIN" --agent fresheye --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"
+      if ! "$AGY_BIN" --agent fresheye --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"; then
+        node "$CTL_JS" switch-failed --from "$FROM_ID" --to "$TARGET_ID" --note "agy --agent fresheye --conversation exited non-zero" || true
+        exit 1
+      fi
     else
       echo "✓ Returning to original conversation (${TARGET_ID:0:8})..." >&2
-      exec "$AGY_BIN" --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"
+      if ! "$AGY_BIN" --conversation "$TARGET_ID" "${PASSTHROUGH_ARGS[@]}"; then
+        node "$CTL_JS" switch-failed --from "$FROM_ID" --to "$TARGET_ID" --note "agy --conversation exited non-zero" || true
+        exit 1
+      fi
     fi
   fi
 else

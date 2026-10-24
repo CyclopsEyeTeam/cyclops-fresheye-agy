@@ -67,7 +67,20 @@ rm -f "${BIN_DIR}/agy-fresheye" "${BIN_DIR}/fresheye" "${BIN_DIR}/fresheye-ctl"
 
 # 2. Remove bashrc helper block
 if [[ -f "${HOME}/.bashrc" ]]; then
-  sed -i '/# >>> Cyclops FreshEye launcher >>>/,/# <<< Cyclops FreshEye launcher <<</d' "${HOME}/.bashrc" 2>/dev/null || true
+  node - "${HOME}/.bashrc" <<'EOF'
+const fs = require('node:fs');
+const [bashrcPath] = process.argv.slice(2);
+try {
+  const raw = fs.readFileSync(bashrcPath, 'utf8');
+  const cleaned = raw.replace(
+    /\n?# >>> Cyclops FreshEye launcher >>>[\s\S]*?# <<< Cyclops FreshEye launcher <<<\n?/g,
+    '\n',
+  );
+  if (cleaned !== raw) {
+    fs.writeFileSync(bashrcPath, cleaned);
+  }
+} catch {}
+EOF
 fi
 
 # 3. Restore statusLine in ~/.gemini/antigravity-cli/settings.json

@@ -9,9 +9,11 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import {
   appendLedger,
   defaultStorePath,
+  isCliEntrypoint,
   isFreshEyeAgentName,
   loadStore,
   originFor,
@@ -19,7 +21,63 @@ import {
   saveStore,
 } from './core.js';
 
-const PENDING_OPEN_TTL_MS = 30 * 60_000;
+const PENDING_OPEN_TTL_MS = 60_000;
+const SUBAGENT_START_WINDOW_MS = 5 * 60_000;
+
+function extractSubagentId(payload) {
+  const candidates = [
+    payload?.result,
+    payload?.toolResult,
+    payload?.response,
+    payload?.output,
+    payload?.toolCall?.result,
+  ];
+  for (const item of candidates) {
+    if (!item) continue;
+    if (typeof item === 'object' && !Array.isArray(item)) {
+      const direct = String(
+        item.conversationId || item.conversation_id || item.subagentId || item.subagent_id || item.id || '',
+      ).trim();
+      if (direct) return direct;
+    }
+    if (typeof item === 'string') {
+      const text = item.trim();
+      if (!text) continue;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const fromJson = String(
+            parsed.conversationId ||
+              parsed.conversation_id ||
+              parsed.subagentId ||
+              parsed.subagent_id ||
+              parsed.id ||
+              '',
+          ).trim();
+          if (fromJson) return fromJson;
+        }
+      } catch {
+        // Not JSON; try pattern match below
+      }
+      const labeled = text.match(
+        /(?:conversationId|conversation_id|subagentId|conversation:\/\/)["'\s:=]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9_-]{8,64})/i,
+      );
+      if (labeled && labeled[1]) return labeled[1].trim();
+      const uuid = text.match(/\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/);
+      if (uuid && uuid[1]) return uuid[1].trim();
+    }
+  }
+  return '';
+}
+
+function workspacesMatch(rootA, rootB) {
+  if (!rootA || !rootB) return true;
+  try {
+    return path.resolve(rootA) === path.resolve(rootB);
+  } catch {
+    return rootA === rootB;
+  }
+}
 
 function parseArgs(argv) {
   let event = '';
@@ -107,26 +165,58 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
           return store;
         }
 
-        // Check if the child subagent already fired SessionStart/PreInvocation just before PostToolUse
+        const resultChildId = extractSubagentId(payload);
         const recentStart = store.activeSession?.lastUnpairedStart;
-        if (
+        const canUseRecentStart =
           recentStart &&
           recentStart.id &&
           recentStart.id !== convId &&
           recentStart.id !== originId &&
-          nowMs - (Date.parse(recentStart.at || '') || 0) < 15_000
-        ) {
+          !recentStart.nonFreshEye &&
+          workspacesMatch(workspaceRoot, recentStart.workspaceRoot) &&
+          nowMs - (Date.parse(recentStart.at || '') || 0) < SUBAGENT_START_WINDOW_MS;
+
+        const matchedChildId =
+          resultChildId && resultChildId !== convId && resultChildId !== originId
+            ? resultChildId
+            : canUseRecentStart
+              ? recentStart.id
+              : '';
+
+        if (matchedChildId) {
+          const matchedStart = recentStart && recentStart.id === matchedChildId ? recentStart : null;
           recordOpenPair(store, {
-            freshId: recentStart.id,
+            freshId: matchedChildId,
             originId,
-            originRoot: workspaceRoot || recentStart.workspaceRoot || '',
-            model: modelName || recentStart.model || store.activeSession?.model || '',
+            originRoot: workspaceRoot || matchedStart?.workspaceRoot || store.activeSession?.workspaceRoot || '',
+            model: modelName || matchedStart?.model || store.activeSession?.model || '',
             prompt,
             mode: 'subagent',
-            createdAt: recentStart.at || nowIso,
+            createdAt: matchedStart?.at || nowIso,
           });
+          if (matchedStart?.stoppedAt) {
+            store.lastRestored = {
+              originId,
+              freshId: matchedChildId,
+              restoredAt: matchedStart.stoppedAt,
+            };
+            appendLedger(store.ledger, {
+              at: matchedStart.stoppedAt,
+              event: 'return',
+              fromId: matchedChildId,
+              toId: originId,
+              originId,
+              freshId: matchedChildId,
+              model: modelName || matchedStart.model || store.activeSession?.model || '',
+              mode: 'subagent',
+              note: 'FreshEye subagent completed and returned to origin',
+            });
+          }
           if (store.activeSession) {
             delete store.activeSession.lastUnpairedStart;
+            if (originId) {
+              store.activeSession.id = originId;
+            }
           }
           store.pendingOpen = null;
         } else {
@@ -142,6 +232,12 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
         }
         saveStore(storePath, store);
         return store;
+      }
+
+      // Non-FreshEye subagent (e.g. research, browser, self): clear lastUnpairedStart so it cannot be mis-paired
+      if (store.activeSession?.lastUnpairedStart) {
+        delete store.activeSession.lastUnpairedStart;
+        saveStore(storePath, store);
       }
     }
     return store;
@@ -161,18 +257,21 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
       isBrandNewTurn &&
       convId !== store.pendingOpen.originId &&
       convId !== store.pendingOpen.fromId &&
-      !store.pairs[convId]
+      !store.pairs[convId] &&
+      workspacesMatch(workspaceRoot, store.pendingOpen.originRoot)
     ) {
       const pending = store.pendingOpen;
-      recordOpenPair(store, {
-        freshId: convId,
-        originId: pending.originId,
-        originRoot: workspaceRoot || pending.originRoot || '',
-        model: modelName || pending.model || '',
-        prompt: pending.prompt || '',
-        mode: pending.mode || 'session',
-        createdAt: nowIso,
-      });
+      if (pending.originId) {
+        recordOpenPair(store, {
+          freshId: convId,
+          originId: pending.originId,
+          originRoot: workspaceRoot || pending.originRoot || '',
+          model: modelName || pending.model || '',
+          prompt: pending.prompt || '',
+          mode: pending.mode || 'session',
+          createdAt: nowIso,
+        });
+      }
       store.pendingOpen = null;
     }
 
@@ -255,22 +354,39 @@ export function handleHookPayload(payload, eventName = '', env = process.env) {
       });
     }
 
-    const lastUnpairedStart =
-      !isFresh && (event === 'SessionStart' || (event === 'PreInvocation' && payload?.invocationNum === 1))
-        ? { id: convId, at: nowIso, model: modelName, workspaceRoot }
-        : store.activeSession?.lastUnpairedStart;
+    let lastUnpairedStart = store.activeSession?.lastUnpairedStart;
+    if (!isFresh && (event === 'SessionStart' || (event === 'PreInvocation' && payload?.invocationNum === 1))) {
+      lastUnpairedStart = { id: convId, at: nowIso, model: modelName, workspaceRoot };
+    } else if (!isFresh && event === 'Stop' && lastUnpairedStart && lastUnpairedStart.id === convId) {
+      lastUnpairedStart = { ...lastUnpairedStart, stoppedAt: nowIso };
+    }
+
+    const payloadAgent = String(payload?.agentName || payload?.agent?.name || payload?.agent || '').trim();
+    const effectiveAgent =
+      payloadAgent ||
+      (isFresh ? 'fresheye' : store.activeSession?.id === convId ? store.activeSession?.agent || '' : '');
 
     // Keep activeSession pointed at the main interactive session when a subagent stops
     if (event === 'Stop' && isFresh && store.pairs[convId]?.mode === 'subagent') {
       store.activeSession = {
         id: store.pairs[convId].originId,
+        agent: '',
         model: modelName || store.pairs[convId].model || store.activeSession?.model || '',
         workspaceRoot: workspaceRoot || store.pairs[convId].originRoot || store.activeSession?.workspaceRoot || '',
         updatedAt: nowIso,
       };
+    } else if (event === 'Stop' && !isFresh && prevId && prevId !== convId && lastUnpairedStart?.id === convId) {
+      // Unpaired subagent stopped before PostToolUse fired; preserve parent activeSession.id
+      store.activeSession = {
+        ...(store.activeSession || {}),
+        id: prevId,
+        updatedAt: nowIso,
+        lastUnpairedStart,
+      };
     } else {
       store.activeSession = {
         id: convId,
+        agent: effectiveAgent,
         model: modelName || store.activeSession?.model || '',
         workspaceRoot: workspaceRoot || store.activeSession?.workspaceRoot || '',
         updatedAt: nowIso,
@@ -295,6 +411,6 @@ function main() {
   process.stdout.write('{}\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isCliEntrypoint(import.meta.url)) {
   main();
 }

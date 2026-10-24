@@ -16,6 +16,7 @@ import {
   defaultStorePath,
   filterFreshEyeAttachments,
   formatLedger,
+  isCliEntrypoint,
   isFreshEyeAgentName,
   loadStore,
   normalizeSwitchMode,
@@ -205,6 +206,11 @@ test('buildAgyStatusLine renders FreshEye strip, 8s restore notice, and empty st
     RESTORE_NOTICE_MS,
   );
   assert.equal(expiredLine, '');
+
+  // 5. New ordinary session with no conversation_id does NOT leak store.activeSession.id
+  store.activeSession = { id: '3c82a10d-1111-2222-3333-444444444444', agent: 'fresheye' };
+  const newOrdinaryLine = buildAgyStatusLine(store, {}, baseMs + 1000);
+  assert.equal(newOrdinaryLine, '');
 });
 
 test('saveStore and loadStore round-trip with 0600 permissions and pruning bounds', () => {
@@ -227,6 +233,8 @@ test('saveStore and loadStore round-trip with 0600 permissions and pruning bound
         toId: `fresh-${i}`,
       });
     }
+    // appendLedger truncates in-place immediately without waiting for saveStore
+    assert.equal(store.ledger.length, MAX_LEDGER);
 
     saveStore(storePath, store);
     const stat = fs.statSync(storePath);
@@ -236,6 +244,36 @@ test('saveStore and loadStore round-trip with 0600 permissions and pruning bound
     assert.equal(Object.keys(loaded.pairs).length, MAX_PAIRS);
     assert.equal(loaded.ledger.length, MAX_LEDGER);
     assert.match(formatLedger(loaded.ledger, 5), /Cyclops FreshEye Ledger/);
+
+    // Verify loadStore guards against arrays in object fields
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify({
+        activeSession: ['bad'],
+        pendingOpen: ['bad'],
+        pendingSwitch: ['bad'],
+        lastRestored: ['bad'],
+      }),
+    );
+    const sanitized = loadStore(storePath);
+    assert.equal(sanitized.activeSession, null);
+    assert.equal(sanitized.pendingOpen, null);
+    assert.equal(sanitized.pendingSwitch, null);
+    assert.equal(sanitized.lastRestored, null);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('isCliEntrypoint resolves symlinks and paths with spaces', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fresheye entrypoint space-'));
+  try {
+    const realFile = path.join(tmpDir, 'real script.js');
+    const symlinkFile = path.join(tmpDir, 'linked script.js');
+    fs.writeFileSync(realFile, '// test\n');
+    fs.symlinkSync(realFile, symlinkFile);
+    const metaUrl = new URL(`file://${encodeURI(realFile)}`).href;
+    assert.equal(isCliEntrypoint(metaUrl, symlinkFile), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

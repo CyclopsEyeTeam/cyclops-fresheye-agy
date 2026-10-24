@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "=========================================="
-echo "  Cyclops FreshEye Installer (agy v0.2.1) "
+echo "  Cyclops FreshEye Installer (agy v0.2.2) "
 echo "=========================================="
 echo "Source:  ${SCRIPT_DIR}"
 echo "Target:  ${TARGET_PLUGIN_DIR}"
@@ -78,13 +78,21 @@ fi
 
 # 2. Install plugin into ~/.gemini/config/plugins/cyclops-fresheye
 mkdir -p "${PLUGINS_DIR}"
-if command -v agy >/dev/null 2>&1; then
-  agy plugin uninstall "${PLUGIN_NAME}" >/dev/null 2>&1 || true
+SOURCE_REAL="$(cd -P "${SCRIPT_DIR}" && pwd)"
+TARGET_REAL="$(mkdir -p "${TARGET_PLUGIN_DIR}" && cd -P "${TARGET_PLUGIN_DIR}" && pwd)"
+
+if [[ "${SOURCE_REAL}" != "${TARGET_REAL}" ]]; then
+  if command -v agy >/dev/null 2>&1; then
+    agy plugin uninstall "${PLUGIN_NAME}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${TARGET_PLUGIN_DIR}"
+  mkdir -p "${TARGET_PLUGIN_DIR}"
+  for item in plugin.json package.json hooks.json README.md CHANGELOG.md LICENSE installer.sh uninstaller.sh agents assets bin docs rules scripts skills; do
+    if [[ -e "${SCRIPT_DIR}/${item}" ]]; then
+      cp -R "${SCRIPT_DIR}/${item}" "${TARGET_PLUGIN_DIR}/"
+    fi
+  done
 fi
-rm -rf "${TARGET_PLUGIN_DIR}"
-mkdir -p "${TARGET_PLUGIN_DIR}"
-cp -R "${SCRIPT_DIR}/." "${TARGET_PLUGIN_DIR}/"
-rm -rf "${TARGET_PLUGIN_DIR}/.git"
 chmod +x "${TARGET_PLUGIN_DIR}/scripts/"*.js "${TARGET_PLUGIN_DIR}/bin/"*
 
 if command -v agy >/dev/null 2>&1; then
@@ -100,14 +108,23 @@ ln -sf "${TARGET_PLUGIN_DIR}/bin/fresheye-ctl" "${BIN_DIR}/fresheye-ctl"
 echo "✓ Installed CLI launchers: agy-fresheye, fresheye, fresheye-ctl"
 
 # 4. Configure stacked statusLine in ~/.gemini/antigravity-cli/settings.json
-if [[ -f "${CLI_SETTINGS}" ]]; then
-  node - "${CLI_SETTINGS}" "${TARGET_PLUGIN_DIR}/scripts/statusline.js" <<'EOF'
+mkdir -p "$(dirname "${CLI_SETTINGS}")"
+node - "${CLI_SETTINGS}" "${TARGET_PLUGIN_DIR}/scripts/statusline.js" <<'EOF'
 const fs = require('node:fs');
 const [settingsPath, statuslineScript] = process.argv.slice(2);
 try {
-  const raw = fs.readFileSync(settingsPath, 'utf8');
-  const data = JSON.parse(raw);
-  const cmd = `node ${statuslineScript}`;
+  let data = {};
+  if (fs.existsSync(settingsPath)) {
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    if (raw.trim()) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        data = parsed;
+      }
+    }
+  }
+  const quotedScript = /\s/.test(statuslineScript) ? JSON.stringify(statuslineScript) : statuslineScript;
+  const cmd = `node ${quotedScript}`;
   if (data.statusLine && data.statusLine.command && !String(data.statusLine.command).includes('cyclops-fresheye')) {
     data._fresheyePreviousStatusLine = data.statusLine;
   }
@@ -124,11 +141,23 @@ try {
   console.error('Notice: Could not update settings.json statusLine automatically:', err.message);
 }
 EOF
-fi
 
 # 5. Add shell wrapper in ~/.bashrc (coexisting with cyclops-prism)
 if [[ -f "${HOME}/.bashrc" ]]; then
-  sed -i '/# >>> Cyclops FreshEye launcher >>>/,/# <<< Cyclops FreshEye launcher <<</d' "${HOME}/.bashrc" 2>/dev/null || true
+  node - "${HOME}/.bashrc" <<'EOF'
+const fs = require('node:fs');
+const [bashrcPath] = process.argv.slice(2);
+try {
+  const raw = fs.readFileSync(bashrcPath, 'utf8');
+  const cleaned = raw.replace(
+    /\n?# >>> Cyclops FreshEye launcher >>>[\s\S]*?# <<< Cyclops FreshEye launcher <<<\n?/g,
+    '\n',
+  );
+  if (cleaned !== raw) {
+    fs.writeFileSync(bashrcPath, cleaned);
+  }
+} catch {}
+EOF
   cat << 'EOF' >> "${HOME}/.bashrc"
 
 # >>> Cyclops FreshEye launcher >>>

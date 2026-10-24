@@ -1,13 +1,36 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-export const VERSION = '0.2.1';
+export const VERSION = '0.2.2';
 export const MAX_PAIRS = 50;
 export const MAX_LEDGER = 1000;
 export const RESTORE_NOTICE_MS = 8000;
 export const CONFIRM_TIMEOUT_MS = 60_000;
 export const SWITCH_MODES = ['ask', 'toggle', 'off'];
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+/**
+ * Reliable ESM CLI entrypoint check that resolves symlinks and handles spaces/special characters.
+ */
+export function isCliEntrypoint(importMetaUrl, argv1 = process.argv[1]) {
+  if (!importMetaUrl || !argv1) return false;
+  try {
+    const resolved = fs.realpathSync(argv1);
+    if (pathToFileURL(resolved).href === importMetaUrl) return true;
+  } catch {
+    // Fallback if argv1 does not exist on disk yet
+  }
+  try {
+    return pathToFileURL(path.resolve(argv1)).href === importMetaUrl;
+  } catch {
+    return false;
+  }
+}
 
 export function shortId(id) {
   const text = String(id || '').trim();
@@ -108,14 +131,10 @@ export function loadStore(storePath) {
       },
       pairs: prunePairs(pairs),
       ledger,
-      activeSession:
-        parsed.activeSession && typeof parsed.activeSession === 'object' ? parsed.activeSession : null,
-      pendingOpen:
-        parsed.pendingOpen && typeof parsed.pendingOpen === 'object' ? parsed.pendingOpen : null,
-      pendingSwitch:
-        parsed.pendingSwitch && typeof parsed.pendingSwitch === 'object' ? parsed.pendingSwitch : null,
-      lastRestored:
-        parsed.lastRestored && typeof parsed.lastRestored === 'object' ? parsed.lastRestored : null,
+      activeSession: isPlainObject(parsed.activeSession) ? parsed.activeSession : null,
+      pendingOpen: isPlainObject(parsed.pendingOpen) ? parsed.pendingOpen : null,
+      pendingSwitch: isPlainObject(parsed.pendingSwitch) ? parsed.pendingSwitch : null,
+      lastRestored: isPlainObject(parsed.lastRestored) ? parsed.lastRestored : null,
     };
   } catch {
     return defaultStore();
@@ -132,10 +151,10 @@ export function saveStore(storePath, store) {
     },
     pairs: prunePairs(store?.pairs || {}),
     ledger: Array.isArray(store?.ledger) ? store.ledger.slice(-MAX_LEDGER) : [],
-    activeSession: store?.activeSession || null,
-    pendingOpen: store?.pendingOpen || null,
-    pendingSwitch: store?.pendingSwitch || null,
-    lastRestored: store?.lastRestored || null,
+    activeSession: isPlainObject(store?.activeSession) ? store.activeSession : null,
+    pendingOpen: isPlainObject(store?.pendingOpen) ? store.pendingOpen : null,
+    pendingSwitch: isPlainObject(store?.pendingSwitch) ? store.pendingSwitch : null,
+    lastRestored: isPlainObject(store?.lastRestored) ? store.lastRestored : null,
   };
   const tmpPath = `${storePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmpPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
@@ -324,7 +343,10 @@ export function stripFreshEyeSections(sections) {
 export function appendLedger(ledger, entry, maxEntries = MAX_LEDGER) {
   const list = Array.isArray(ledger) ? ledger : [];
   if (!entry || typeof entry !== 'object' || typeof entry.event !== 'string') {
-    return list.slice(-maxEntries);
+    if (list.length > maxEntries) {
+      list.splice(0, list.length - maxEntries);
+    }
+    return list;
   }
   const item = {
     at: typeof entry.at === 'string' && entry.at ? entry.at : new Date().toISOString(),
@@ -341,7 +363,7 @@ export function appendLedger(ledger, entry, maxEntries = MAX_LEDGER) {
   };
   list.push(item);
   if (list.length > maxEntries) {
-    return list.slice(-maxEntries);
+    list.splice(0, list.length - maxEntries);
   }
   return list;
 }
@@ -418,7 +440,7 @@ export function buildSessionBanner(pair, currentId) {
   const modelPart = pair.model ? ` · model ${pair.model}` : '';
   return [
     `◎ FreshEye · Fresh Context (${freshShort}) · opened ${opened}${modelPart} · original ${originShort} kept`,
-    `  Withheld: AGENTS.md, GEMINI.md, rules, skills · /fresheye or /resume ${originShort} to return`,
+    `  Withheld: AGENTS.md, GEMINI.md, rules, skills · agy --fresheye or /resume to return`,
   ];
 }
 
@@ -428,14 +450,14 @@ export function buildConfirmPrompt(target) {
   if (target.direction === 'return') {
     return {
       title: `Return to original conversation (${targetShort})?`,
-      subtitle: 'FreshEye conversation stays saved; you can switch back anytime with /fresheye or /resume.',
+      subtitle: 'FreshEye conversation stays saved; you can switch back anytime with agy --fresheye or /resume.',
       confirmLabel: `Return to original (${targetShort})`,
       cancelLabel: 'Stay here',
     };
   }
   return {
     title: `Switch to paired FreshEye conversation (${targetShort})?`,
-    subtitle: 'Your original conversation stays saved; use /fresheye or /resume to come back.',
+    subtitle: 'Your original conversation stays saved; use agy --fresheye or /resume to come back.',
     confirmLabel: `Enter FreshEye (${targetShort})`,
     cancelLabel: 'Stay here',
   };
@@ -456,25 +478,27 @@ export function buildAgyStatusLine(
 
   const convId = String(
     statusData?.conversation_id ||
+      statusData?.conversationId ||
       statusData?.session_id ||
-      store.activeSession?.id ||
+      statusData?.sessionId ||
       '',
   ).trim();
 
-  const agentName = String(
+  const rawAgent =
     statusData?.agent?.name ||
-      statusData?.agent?.display_name ||
-      statusData?.agent ||
-      store.activeSession?.agent ||
-      '',
-  ).trim();
+    statusData?.agent?.display_name ||
+    statusData?.agent_name ||
+    (typeof statusData?.agent === 'string' ? statusData.agent : '') ||
+    (convId && store.activeSession?.id === convId ? store.activeSession?.agent : '') ||
+    '';
+  const agentName = String(rawAgent).trim();
 
   if (convId && store.pairs?.[convId]) {
     const pair = store.pairs[convId];
     const originShort = shortId(pair.originId);
     const freshShort = shortId(convId);
     const opened = formatTime(pair.createdAt);
-    return `◎ FreshEye · Fresh Context (${freshShort}) · opened ${opened} · original ${originShort} kept · /resume ${originShort} to return`;
+    return `◎ FreshEye · Fresh Context (${freshShort}) · opened ${opened} · original ${originShort} kept · agy --fresheye or /resume to return`;
   }
 
   if (isFreshEyeAgentName(agentName)) {
@@ -487,7 +511,8 @@ export function buildAgyStatusLine(
     restored &&
     typeof restored === 'object' &&
     restored.originId &&
-    (!convId || restored.originId === convId)
+    convId &&
+    restored.originId === convId
   ) {
     const restoredTs = Date.parse(restored.restoredAt || '') || 0;
     if (restoredTs > 0 && nowMs - restoredTs >= 0 && nowMs - restoredTs < restoreNoticeMs) {

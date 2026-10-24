@@ -9,14 +9,14 @@
  */
 
 import fs from 'node:fs';
-import { buildAgyStatusLine, defaultStorePath, loadStore } from './core.js';
+import { buildAgyStatusLine, defaultStorePath, isCliEntrypoint, loadStore } from './core.js';
 
 function readStdinJson() {
   try {
     const raw = fs.readFileSync(0, 'utf8');
     if (!raw || !raw.trim()) return {};
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -36,6 +36,6 @@ function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isCliEntrypoint(import.meta.url)) {
   main();
 }

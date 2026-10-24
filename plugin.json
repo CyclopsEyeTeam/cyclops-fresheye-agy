@@ -1,7 +1,7 @@
 {
   "name": "cyclops-fresheye",
   "displayName": "Cyclops FreshEye",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Same AI, fresh perspective. Open a clean-context FreshEye review or session on the same model with AGENTS.md, GEMINI.md, rules, and ambient customizations withheld, while keeping your original conversation untouched.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

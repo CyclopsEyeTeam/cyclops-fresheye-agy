@@ -19,6 +19,7 @@ import {
   conversationExistsOnDisk,
   defaultStorePath,
   formatLedger,
+  isCliEntrypoint,
   loadStore,
   normalizeSwitchMode,
   originFor,
@@ -28,16 +29,29 @@ import {
   shortId,
 } from './core.js';
 
-function parseFlags(argv) {
+const BOOLEAN_FLAGS = new Set(['json', 'interactive', 'check-disk', 'help', 'h']);
+
+export function parseFlags(argv) {
   const positional = [];
   const flags = {};
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === '--') {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
     if (arg.startsWith('--')) {
+      const eqIdx = arg.indexOf('=');
+      if (eqIdx !== -1) {
+        const key = arg.slice(2, eqIdx);
+        flags[key] = arg.slice(eqIdx + 1);
+        continue;
+      }
       const key = arg.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
+      if (BOOLEAN_FLAGS.has(key)) {
+        flags[key] = true;
+      } else if (i + 1 < argv.length) {
+        flags[key] = argv[i + 1];
         i += 1;
       } else {
         flags[key] = true;
@@ -50,15 +64,23 @@ function parseFlags(argv) {
 }
 
 /**
- * Find the most recently modified conversation ID on disk if `store.activeSession` is empty.
+ * Find the active or most recently modified conversation ID.
+ * Checks ANTIGRAVITY_CONVERSATION_ID first, then store.activeSession, then conversation files on disk.
  */
-function detectRecentConversationId(store, homeDir = os.homedir()) {
+export function detectRecentConversationId(store, env = process.env, homeDir = os.homedir()) {
+  const envConvId = String(env.ANTIGRAVITY_CONVERSATION_ID || env.AGY_CONVERSATION_ID || '').trim();
+  if (envConvId) {
+    return envConvId;
+  }
   if (store?.activeSession?.id) {
     return String(store.activeSession.id).trim();
   }
+  const testDir = String(env.CYCLOPS_FRESHEYE_CONVERSATIONS_DIR || '').trim();
   const convDirs = [
+    ...(testDir ? [testDir] : []),
     path.join(homeDir, '.gemini', 'antigravity-cli', 'conversations'),
     path.join(homeDir, '.gemini', 'antigravity', 'conversations'),
+    path.join(homeDir, '.gemini', 'antigravity-ide', 'conversations'),
   ];
   let newestId = '';
   let newestMtime = 0;
@@ -96,11 +118,12 @@ async function promptSwitchConfirm(target, timeoutMs = CONFIRM_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
     let rl = null;
+    const timeoutSec = Math.max(1, Math.round(timeoutMs / 1000));
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       if (rl) rl.close();
-      process.stderr.write('\n◎ FreshEye switch confirmation timed out after 60s · Staying here.\n');
+      process.stderr.write(`\n◎ FreshEye switch confirmation timed out after ${timeoutSec}s · Staying here.\n`);
       resolve({ outcome: 'timeout' });
     }, timeoutMs);
 
@@ -141,6 +164,13 @@ async function promptSwitchConfirm(target, timeoutMs = CONFIRM_TIMEOUT_MS) {
       process.stderr.write('\n');
       resolve({ outcome: 'cancelled' });
     });
+
+    rl.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ outcome: 'cancelled' });
+    });
   });
 }
 
@@ -151,18 +181,19 @@ async function main() {
   const nowIso = new Date().toISOString();
 
   if (subcommand === 'log') {
-    const limit = flags.limit || args[0] || 20;
+    const rawLimit = flags.limit ?? args[0] ?? 20;
+    const count = Math.max(1, Math.min(200, Number(rawLimit) || 20));
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify(store.ledger.slice(-Number(limit || 20)), null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify(store.ledger.slice(-count).reverse(), null, 2)}\n`);
     } else {
-      process.stdout.write(`${formatLedger(store.ledger, limit)}\n`);
+      process.stdout.write(`${formatLedger(store.ledger, count)}\n`);
     }
     return;
   }
 
   if (subcommand === 'mode') {
     const requested = args[0] || flags.set;
-    if (requested) {
+    if (requested && typeof requested === 'string') {
       store.settings.switchMode = normalizeSwitchMode(requested);
       saveStore(storePath, store);
       process.stdout.write(`Cyclops FreshEye switchMode set to: ${store.settings.switchMode}\n`);
@@ -173,13 +204,15 @@ async function main() {
   }
 
   if (subcommand === 'prepare-open') {
-    const rawOrigin = String(flags.origin || detectRecentConversationId(store) || 'origin-session').trim();
-    const trueOriginId = originFor(store.pairs, rawOrigin);
-    const rawPrompt = String(flags.prompt || args.join(' ') || '').trim();
+    const rawOrigin = String(flags.origin || detectRecentConversationId(store, process.env) || '').trim();
+    const trueOriginId = rawOrigin ? originFor(store.pairs, rawOrigin) : '';
+    const rawPrompt = typeof flags.prompt === 'string' ? flags.prompt.trim() : args.join(' ').trim();
     const prompt = rawPrompt || (flags.interactive ? '(interactive session)' : '');
-    const model = String(flags.model || store.activeSession?.model || '').trim();
-    const workspaceRoot = String(flags.workspace || store.activeSession?.workspaceRoot || process.cwd()).trim();
-    const mode = String(flags.mode || 'session').trim();
+    const model = String((typeof flags.model === 'string' ? flags.model : '') || store.activeSession?.model || '').trim();
+    const workspaceRoot = String(
+      (typeof flags.workspace === 'string' ? flags.workspace : '') || store.activeSession?.workspaceRoot || '',
+    ).trim();
+    const mode = String((typeof flags.mode === 'string' ? flags.mode : '') || 'session').trim();
 
     if (!prompt) {
       process.stderr.write('Error: FreshEye requires a prompt to open a fresh context.\n');
@@ -206,13 +239,27 @@ async function main() {
     return;
   }
 
+  if (subcommand === 'clear-pending') {
+    if (store.pendingOpen) {
+      store.pendingOpen = null;
+      saveStore(storePath, store);
+    }
+    return;
+  }
+
   if (subcommand === 'open-failed') {
     const pending = store.pendingOpen;
-    const fromId = String(flags.from || pending?.fromId || store.activeSession?.id || '').trim();
-    const originId = String(flags.origin || pending?.originId || fromId).trim();
-    const model = String(flags.model || pending?.model || '').trim();
-    const prompt = String(flags.prompt || pending?.prompt || '').trim();
-    const note = String(flags.note || 'FreshEye session failed to open').trim();
+    const fromId = String(
+      (typeof flags.from === 'string' ? flags.from : '') || pending?.fromId || store.activeSession?.id || '',
+    ).trim();
+    const originId = String(
+      (typeof flags.origin === 'string' ? flags.origin : '') || pending?.originId || fromId,
+    ).trim();
+    const model = String((typeof flags.model === 'string' ? flags.model : '') || pending?.model || '').trim();
+    const prompt = String((typeof flags.prompt === 'string' ? flags.prompt : '') || pending?.prompt || '').trim();
+    const note = String(
+      (typeof flags.note === 'string' ? flags.note : '') || 'FreshEye session failed to open',
+    ).trim();
 
     appendLedger(store.ledger, {
       at: nowIso,
@@ -225,6 +272,45 @@ async function main() {
       note,
     });
     store.pendingOpen = null;
+    saveStore(storePath, store);
+    return;
+  }
+
+  if (subcommand === 'switch-failed') {
+    const fromId = String((typeof flags.from === 'string' ? flags.from : '') || '').trim();
+    const toId = String((typeof flags.to === 'string' ? flags.to : '') || '').trim();
+    const pair = store.pairs[toId] || store.pairs[fromId] || null;
+    const originId = String(
+      (typeof flags.origin === 'string' ? flags.origin : '') || pair?.originId || fromId || '',
+    ).trim();
+    const freshId = String(
+      (typeof flags.fresh === 'string' ? flags.fresh : '') || (store.pairs[toId] ? toId : store.pairs[fromId] ? fromId : ''),
+    ).trim();
+    const note = String(
+      (typeof flags.note === 'string' ? flags.note : '') || 'Failed to launch agy for target conversation',
+    ).trim();
+
+    appendLedger(store.ledger, {
+      at: nowIso,
+      event: 'switch-failed',
+      fromId,
+      toId,
+      originId,
+      freshId,
+      model: pair?.model || store.activeSession?.model || '',
+      mode: pair?.mode || 'session',
+      note,
+    });
+    if (fromId) {
+      store.activeSession = {
+        ...(store.activeSession || {}),
+        id: fromId,
+        updatedAt: nowIso,
+      };
+    }
+    if (store.lastRestored && store.lastRestored.originId === toId) {
+      store.lastRestored = null;
+    }
     saveStore(storePath, store);
     return;
   }
@@ -265,7 +351,9 @@ async function main() {
   }
 
   if (subcommand === 'status') {
-    const currentId = String(flags.session || detectRecentConversationId(store) || '').trim();
+    const currentId = String(
+      (typeof flags.session === 'string' ? flags.session : '') || detectRecentConversationId(store, process.env) || '',
+    ).trim();
     const target = pickTarget(store.pairs, currentId);
     const activePair = store.pairs[currentId] || target?.pair || null;
 
@@ -298,7 +386,9 @@ async function main() {
       for (const line of banner) {
         process.stdout.write(`${line}\n`);
       }
-      process.stdout.write(`  To return to original: /resume ${target.targetId} (or run: agy-fresheye)\n`);
+      process.stdout.write(
+        `  To return to original: agy --fresheye (or agy --conversation ${target.targetId} / /resume)\n`,
+      );
     } else {
       const freshShort = shortId(target.freshId);
       const originShort = shortId(currentId);
@@ -307,14 +397,16 @@ async function main() {
       const previewPart = target.pair.promptPreview ? `\n  Topic: "${target.pair.promptPreview}"` : '';
       process.stdout.write(
         `◎ Paired FreshEye session available: ${freshShort} (from original ${originShort}${modelPart}${modePart})${previewPart}\n` +
-          `  To enter FreshEye session: /resume ${target.targetId} (or run: agy-fresheye)\n`,
+          `  To enter FreshEye session: agy --fresheye (or agy --agent fresheye --conversation ${target.targetId})\n`,
       );
     }
     return;
   }
 
   if (subcommand === 'switch') {
-    const currentId = String(flags.session || detectRecentConversationId(store) || '').trim();
+    const currentId = String(
+      (typeof flags.session === 'string' ? flags.session : '') || detectRecentConversationId(store, process.env) || '',
+    ).trim();
     const target = pickTarget(store.pairs, currentId);
     if (!target) {
       process.stderr.write(
@@ -324,7 +416,7 @@ async function main() {
       return;
     }
 
-    if (flags['check-disk'] && !conversationExistsOnDisk(target.targetId)) {
+    if (flags['check-disk'] && !conversationExistsOnDisk(target.targetId, { env: process.env })) {
       delete store.pairs[target.freshId];
       appendLedger(store.ledger, {
         at: nowIso,
@@ -348,7 +440,7 @@ async function main() {
     const switchMode = normalizeSwitchMode(flags.mode || store.settings.switchMode);
     if (switchMode === 'off') {
       process.stderr.write(
-        `Automatic switching is off. Switch manually with: agy --conversation ${target.targetId} (or /resume ${target.targetId})\n`,
+        `Automatic switching is off. Switch manually with: agy --conversation ${target.targetId} (or /resume)\n`,
       );
       process.exitCode = 4;
       return;
@@ -397,18 +489,19 @@ async function main() {
     store.activeSession = {
       ...(store.activeSession || {}),
       id: target.targetId,
+      agent: target.direction === 'enter' ? 'fresheye' : '',
       updatedAt: new Date().toISOString(),
     };
     saveStore(storePath, store);
 
     if (flags.json) {
-      process.stdout.write(`${JSON.stringify(target)}\n`);
+      process.stdout.write(`${JSON.stringify({ ...target, fromId: currentId })}\n`);
     } else {
       process.stdout.write(`${target.targetId}\n`);
     }
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isCliEntrypoint(import.meta.url)) {
   main();
 }
